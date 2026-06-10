@@ -74,6 +74,7 @@ class TraceResult:
     def format(
         self,
         *,
+        debug: bool = False,
         equations: bool = False,
         color: bool = False,
         max_equations: int | None = 25,
@@ -84,6 +85,8 @@ class TraceResult:
 
         Parameters
         ----------
+        debug:
+            Include JAXPR-first diagnostic context for locating the failing primitive.
         equations:
             Include a primitive-by-primitive unit propagation table.
         color:
@@ -99,6 +102,7 @@ class TraceResult:
 
         return format_report(
             self,
+            debug=debug,
             equations=equations,
             color=color,
             max_equations=max_equations,
@@ -139,6 +143,7 @@ class UnitTraceError(ValueError):
 def format_report(
     result: TraceResult,
     *,
+    debug: bool = False,
     equations: bool = False,
     color: bool = False,
     max_equations: int | None = 25,
@@ -161,12 +166,12 @@ def format_report(
     lines.append("")
     lines.append(palette.section("Inputs"))
     for index, spec in enumerate(result.input_specs):
-        lines.extend(_format_spec_row(f"input[{index}]", spec))
+        lines.extend(_format_array_card(f"input[{index}]", spec, debug=debug))
 
     lines.append("")
     lines.append(palette.section("Outputs"))
     for index, spec in enumerate(result.output_specs):
-        lines.extend(_format_spec_row(f"output[{index}]", spec))
+        lines.extend(_format_array_card(f"output[{index}]", spec, debug=debug))
 
     if result.diagnostics:
         lines.append("")
@@ -182,7 +187,7 @@ def format_report(
         lines.append(palette.section("Diagnostics"))
         lines.append(palette.ok("- none"))
 
-    if result.diagnostics and diagnostic_context:
+    if result.diagnostics and diagnostic_context and debug:
         lines.append("")
         lines.append(palette.section("Debug context"))
         lines.extend(_format_diagnostic_context(result, palette, context=context))
@@ -203,18 +208,48 @@ def format_report(
     return "\n".join(lines)
 
 
-def _format_spec_row(label: str, spec: ArraySpec) -> list[str]:
-    shape = "unknown" if spec.shape is None else spec.shape
+def _format_array_card(label: str, spec: ArraySpec, *, debug: bool) -> list[str]:
+    shape = "unknown" if spec.shape is None else _format_shape(spec.shape)
     dtype = "unknown" if spec.dtype is None else spec.dtype
-    lines = [f"- {label}: unit={spec.describe()}  shape={shape}  dtype={dtype}"]
+    lines = [f"- {label}: {dtype}{shape}"]
+    if not spec.partitions:
+        lines.append(f"    unit: {spec.unit}")
+        return lines
+
+    lines.append("    unit: partitioned")
     for partition in spec.partitions:
-        segments = " | ".join(
-            f"[{segment.start}:{segment.stop}) {segment.unit}" for segment in partition.segments
-        )
-        lines.append(f"    partitioned axis {partition.axis}: {segments}")
-        if spec.shape is not None and partition.axis < len(spec.shape):
-            lines.append(f"      axis length: {spec.shape[partition.axis]}, fallback unit outside segments: {spec.unit}")
+        axis_name = _axis_label(partition.axis)
+        lines.append(f"    {axis_name} is partitioned:")
+        for start, stop, unit, source in _partition_intervals(spec, partition):
+            suffix = "" if source == "explicit" else "  (implicit)"
+            lines.append(f"      {axis_name} [{start}:{stop})  {unit}{suffix}")
     return lines
+
+
+
+def _partition_intervals(spec: ArraySpec, partition: Any) -> list[tuple[int, int, object, str]]:
+    """Return explicit partition intervals plus implicit fallback gaps."""
+
+    if spec.shape is None or partition.axis >= len(spec.shape):
+        return [(segment.start, segment.stop, segment.unit, "explicit") for segment in partition.segments]
+
+    axis_length = int(spec.shape[partition.axis])
+    intervals: list[tuple[int, int, object, str]] = []
+    cursor = 0
+    for segment in partition.segments:
+        if cursor < segment.start:
+            intervals.append((cursor, segment.start, spec.unit, "implicit"))
+        intervals.append((segment.start, segment.stop, segment.unit, "explicit"))
+        cursor = segment.stop
+    if cursor < axis_length:
+        intervals.append((cursor, axis_length, spec.unit, "implicit"))
+    return intervals
+def _format_shape(shape: tuple[int, ...]) -> str:
+    return "[" + ", ".join(str(dim) for dim in shape) + "]"
+
+
+def _axis_label(axis: int) -> str:
+    return f"axis {axis}"
 
 
 def _format_diagnostic_context(
@@ -233,18 +268,20 @@ def _format_diagnostic_context(
         if diagnostic.equation_index in seen:
             continue
         seen.add(diagnostic.equation_index)
+        equation = result.equation_traces[center]
+        lines.append(palette.error(f"- {diagnostic.primitive} at equation #{diagnostic.equation_index}: {diagnostic.message}"))
+        if equation.jaxpr:
+            lines.append("    JAXPR location:")
+            lines.append(f"      {equation.jaxpr}")
+        lines.append("    Unit-annotated location:")
+        lines.append(f"      {_format_equation(equation)}")
         start = max(0, center - max(context, 0))
         stop = min(len(result.equation_traces), center + max(context, 0) + 1)
-        lines.append(f"- around equation #{diagnostic.equation_index} ({diagnostic.primitive}):")
-        for equation in result.equation_traces[start:stop]:
-            is_focus = equation.index == diagnostic.equation_index
-            marker = "=>" if is_focus else "  "
-            rendered = _format_equation(equation)
-            if is_focus:
-                rendered = palette.error(rendered)
-            lines.append(f"    {marker} {rendered}")
-            if is_focus and equation.jaxpr:
-                lines.append(f"       jaxpr: {equation.jaxpr}")
+        if stop - start > 1:
+            lines.append("    Nearby unit trace:")
+            for nearby in result.equation_traces[start:stop]:
+                marker = "=>" if nearby.index == diagnostic.equation_index else "  "
+                lines.append(f"      {marker} {_format_equation(nearby)}")
     if not lines:
         lines.append("- no equation context available")
     return lines
