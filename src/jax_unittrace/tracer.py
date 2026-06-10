@@ -18,7 +18,7 @@ from .specs import (
     remap_partitions_for_transpose,
     slice_partitions,
 )
-from .units import ONE, UnitLike, as_unit
+from .units import ONE, Unit, UnitLike, as_unit, parse_unit
 
 
 @dataclass(frozen=True)
@@ -182,6 +182,9 @@ class _Interpreter:
         output_shape = _shape_of_var(outvars[0]) if outvars else None
 
         if primitive in {"add", "sub"}:
+            log_result = _try_log_space_add(inputs[0], inputs[1], subtract=(primitive == "sub"))
+            if log_result is not None:
+                return (log_result.with_shape(output_shape),)
             self._check_additive(inputs[0], inputs[1], primitive, equation_index)
             return (_merge_additive_output(inputs[0], inputs[1]).with_shape(output_shape),)
 
@@ -233,6 +236,12 @@ class _Interpreter:
         if primitive in {"rsqrt"}:
             return (inputs[0].power(Fraction(-1, 2)).with_shape(output_shape),)
 
+
+        if primitive in _LOG_DERIVED_PRIMITIVES:
+            return (inputs[0].map_units(lambda unit: _derived_log_unit(primitive, unit)).with_shape(output_shape),)
+
+        if primitive in _EXP_DERIVED_PRIMITIVES:
+            return (inputs[0].map_units(lambda unit: _derived_exp_unit(primitive, unit)).with_shape(output_shape),)
         if primitive in _DIMENSIONLESS_INPUT_OUTPUT_PRIMITIVES:
             for input_spec in inputs:
                 self._require_dimensionless(input_spec, primitive, equation_index)
@@ -550,6 +559,64 @@ def _unit_mismatch_message(primitive: str, left: ArraySpec, right: ArraySpec) ->
         return f"cannot compare ordered values with units {left.describe()} and {right.describe()}"
     return f"unit mismatch in {primitive}: expected compatible units, got {left.describe()} and {right.describe()}"
 
+
+def _derived_log_unit(primitive: str, unit: Unit) -> Unit:
+    if unit == ONE:
+        return ONE
+    return Unit.atom(f"{primitive}[{unit}]")
+
+
+def _derived_exp_unit(primitive: str, unit: Unit) -> Unit:
+    if unit == ONE:
+        return ONE
+    if primitive == "exp":
+        inner = _unwrap_log_unit(unit)
+        if inner is not None:
+            return inner
+    return Unit.atom(f"{primitive}[{unit}]")
+
+
+def _unwrap_log_unit(unit: Unit) -> Unit | None:
+    if len(unit.powers) != 1:
+        return None
+    (name, exponent), = unit.powers.items()
+    if exponent != 1 or not name.startswith("log[") or not name.endswith("]"):
+        return None
+    try:
+        return parse_unit(name[4:-1])
+    except Exception:
+        return None
+
+
+def _try_log_space_add(left: ArraySpec, right: ArraySpec, *, subtract: bool) -> ArraySpec | None:
+    if left.partitions or right.partitions:
+        return None
+    unit = _combine_log_space_units(left.unit, right.unit, subtract=subtract)
+    if unit is None:
+        return None
+    shape = left.shape if left.shape is not None else right.shape
+    dtype = left.dtype if left.dtype is not None else right.dtype
+    return ArraySpec(unit, (), shape, dtype)
+
+
+def _combine_log_space_units(left: Unit, right: Unit, *, subtract: bool) -> Unit | None:
+    left_arg = _log_argument_or_dimensionless(left)
+    right_arg = _log_argument_or_dimensionless(right)
+    if left_arg is None or right_arg is None:
+        return None
+    combined = left_arg / right_arg if subtract else left_arg * right_arg
+    if combined == ONE:
+        return ONE
+    return Unit.atom(f"log[{combined}]")
+
+
+def _log_argument_or_dimensionless(unit: Unit) -> Unit | None:
+    if unit == ONE:
+        return ONE
+    return _unwrap_log_unit(unit)
+
+_LOG_DERIVED_PRIMITIVES = {"log", "log1p"}
+_EXP_DERIVED_PRIMITIVES = {"exp", "exp2", "expm1"}
 _DIMENSIONLESS_INPUT_OUTPUT_PRIMITIVES = {
     "acos",
     "acosh",
@@ -561,11 +628,6 @@ _DIMENSIONLESS_INPUT_OUTPUT_PRIMITIVES = {
     "cosh",
     "erf",
     "erfc",
-    "exp",
-    "exp2",
-    "expm1",
-    "log",
-    "log1p",
     "logistic",
     "sin",
     "sinh",

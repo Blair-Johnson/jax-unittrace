@@ -35,6 +35,47 @@ acceleration = m / s**2
 also_acceleration = units({"m": 1, "s": -2})
 ```
 
+## Exponential and logarithmic functions
+
+`jnp.log` (natural log / ln) and friends create derived symbolic units rather
+than requiring dimensionless inputs. This matches workflows where `log(m)` is a
+meaningful derived quantity:
+
+```python
+m = unit("m")
+s = unit("s")
+
+trace_units(lambda x: jnp.log(x), tag(jnp.ones(3), m)).output_specs[0].unit
+# log[m]
+
+trace_units(lambda x: jnp.exp(x), tag(jnp.ones(3), m)).output_specs[0].unit
+# exp[m]
+
+trace_units(lambda x: jnp.exp(jnp.log(x)), tag(jnp.ones(3), m)).output_specs[0].unit
+# m
+```
+
+Log-derived units are additive in exponent space:
+
+```python
+trace_units(
+    lambda x, y: jnp.log(x) + jnp.log(y),
+    tag(jnp.ones(3), m),
+    tag(jnp.ones(3), s),
+).output_specs[0].unit
+# log[m*s]
+
+trace_units(
+    lambda u, x: jnp.exp(u + jnp.log(x)),
+    tag(jnp.ones(3), ONE),
+    tag(jnp.ones(3), m),
+).output_specs[0].unit
+# m
+```
+
+Other transcendental functions such as trigonometric functions remain strict and
+require dimensionless inputs.
+
 ## Checking additions
 
 Addition, subtraction, comparisons, and additive reductions require matching

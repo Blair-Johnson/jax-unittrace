@@ -121,6 +121,68 @@ def units(mapping: Mapping[str, Exponent]) -> Unit:
     return Unit(mapping)
 
 
+
+def parse_unit(text: str) -> Unit:
+    """Parse the simple string form emitted by :class:`Unit`.
+
+    This parser is intentionally small and is meant for round-tripping this
+    library's own display format, e.g. ``"m*s^-2"``, ``"log[m*s^-1]"``, or
+    ``"1"``.
+    """
+
+    if text in {"", "1", "dimensionless"}:
+        return ONE
+    terms: list[str | tuple[str, Fraction]] = []
+    for piece in _split_unit_product(text):
+        if not piece:
+            raise ValueError(f"invalid unit string {text!r}")
+        power_split = _split_unit_power(piece)
+        if power_split is None:
+            terms.append(piece)
+        else:
+            name, exponent_text = power_split
+            terms.append((name, Fraction(exponent_text)))
+    return Unit.from_terms(*terms)
+
+
+def _split_unit_product(text: str) -> list[str]:
+    pieces: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(text):
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth < 0:
+                raise ValueError(f"invalid unit string {text!r}")
+        elif char == "*" and depth == 0:
+            pieces.append(text[start:index])
+            start = index + 1
+    if depth != 0:
+        raise ValueError(f"invalid unit string {text!r}")
+    pieces.append(text[start:])
+    return pieces
+
+
+def _split_unit_power(text: str) -> tuple[str, str] | None:
+    depth = 0
+    power_index: int | None = None
+    for index, char in enumerate(text):
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth < 0:
+                raise ValueError(f"invalid unit string {text!r}")
+        elif char == "^" and depth == 0:
+            power_index = index
+    if depth != 0:
+        raise ValueError(f"invalid unit string {text!r}")
+    if power_index is None:
+        return None
+    return text[:power_index], text[power_index + 1 :]
+
 def dimensionless() -> Unit:
     return Unit.dimensionless()
 

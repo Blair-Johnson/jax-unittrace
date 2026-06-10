@@ -49,17 +49,66 @@ def test_addition_with_different_units_is_an_error():
         result.raise_on_error()
 
 
-def test_transcendental_requires_dimensionless_input():
+def test_exp_and_natural_log_of_dimensionless_return_dimensionless():
+    result = trace_units(lambda x: jnp.exp(x) + jnp.log(x), tag(jnp.ones(2), ONE))
+
+    assert result.ok
+    assert result.output_specs[0].unit == ONE
+
+
+def test_log_of_unitful_value_creates_derived_log_unit():
     m = unit("m")
 
-    def f(x):
-        return jnp.exp(x)
+    result = trace_units(lambda x: jnp.log(x), tag(jnp.ones(2), m))
 
-    result = trace_units(f, tag(jnp.ones(2), m))
+    assert result.ok
+    assert result.output_specs[0].unit == unit("log[m]")
+
+
+def test_exp_of_unitful_value_creates_derived_exp_unit():
+    m = unit("m")
+
+    result = trace_units(lambda x: jnp.exp(x), tag(jnp.ones(2), m))
+
+    assert result.ok
+    assert result.output_specs[0].unit == unit("exp[m]")
+
+
+def test_exp_of_log_unit_round_trips_original_unit():
+    m = unit("m")
+
+    result = trace_units(lambda x: jnp.exp(jnp.log(x)), tag(jnp.ones(2), m))
+
+    assert result.ok
+    assert result.output_specs[0].unit == m
+
+
+def test_exp_of_dimensionless_plus_log_unit_round_trips_log_component():
+    m = unit("m")
+
+    result = trace_units(lambda u, x: jnp.exp(u + jnp.log(x)), tag(jnp.ones(2), ONE), tag(jnp.ones(2), m))
+
+    assert result.ok
+    assert result.output_specs[0].unit == m
+
+
+def test_log_units_add_multiplicatively_in_exponent_space():
+    m = unit("m")
+    s = unit("s")
+
+    result = trace_units(lambda x, y: jnp.log(x) + jnp.log(y), tag(jnp.ones(2), m), tag(jnp.ones(2), s))
+
+    assert result.ok
+    assert result.output_specs[0].unit == unit("log[m*s]")
+
+
+def test_log_unit_plus_raw_unit_still_errors():
+    m = unit("m")
+
+    result = trace_units(lambda x, y: jnp.log(x) + y, tag(jnp.ones(2), m), tag(jnp.ones(2), m))
 
     assert not result.ok
-    assert result.errors[0].code == "expected-dimensionless"
-    assert result.output_specs[0].unit == ONE
+    assert result.errors[0].code == "unit-mismatch"
 
 
 def test_dot_general_multiplies_units():

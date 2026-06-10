@@ -18,7 +18,7 @@ Typical use::
 from .result import Diagnostic, EquationTrace, TraceResult, UnitTraceError, format_report
 from .specs import ArraySpec, AxisPartition, AxisSegment
 from .tracer import TaggedArray, spec, tag, trace, trace_units
-from .units import ONE, Unit, as_unit, dimensionless, unit, units
+from .units import ONE, Unit, as_unit, dimensionless, parse_unit, unit, units
 
 __all__ = [
     "ArraySpec",
@@ -34,6 +34,7 @@ __all__ = [
     "as_unit",
     "dimensionless",
     "format_report",
+    "parse_unit",
     "spec",
     "tag",
     "trace",
