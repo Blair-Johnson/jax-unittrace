@@ -2,10 +2,8 @@
 
 A small static unit tracer for ordinary JAX programs.
 
-The tracer uses `jax.make_jaxpr` to inspect a computation graph from example
-inputs.  Users tag boundary arrays with symbolic units; the original function
-receives raw JAX arrays, so there are no custom array wrappers inside the user
-program.
+The tracer uses `jax.make_jaxpr` to inspect a computation graph. Users tag boundary 
+arrays with symbolic units, and the library infers intermediate units and flags unit violations.
 
 ```python
 import jax.numpy as jnp
@@ -53,8 +51,7 @@ print(result.errors[0])
 
 ## Human-readable reports
 
-`trace_units` returns structured data, but the result can also format itself for
-interactive debugging:
+`trace_units` returns structured data and can be formatted into human-readable reports.
 
 ```python
 result = trace_units(bad, tag(jnp.ones(3), m), tag(jnp.ones(3), s))
@@ -64,14 +61,12 @@ result.print_report(equations=True, color=True)
 result.save_report("unit-report.txt", equations=True)
 ```
 
-Reports include inputs, outputs, diagnostics, local equation context around
-errors, and hints for common ML bugs such as residual/add/where branches mixing
-arrays with different implicit units.
+Reports include inputs, outputs, diagnostics, and jaxpr equations.
 
 ## Axis partitions
 
-Axis partitions represent piecewise units along array axes, especially the
-result of concatenating arrays with different units:
+Axis partitions represent piecewise units along array axes, allowing unit tracking across 
+concatenated arrays of different units:
 
 ```python
 def join(a, b):
