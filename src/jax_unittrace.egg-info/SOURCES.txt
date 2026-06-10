@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/jax_unittrace/__init__.py
+src/jax_unittrace/py.typed
+src/jax_unittrace/result.py
+src/jax_unittrace/specs.py
+src/jax_unittrace/tracer.py
+src/jax_unittrace/units.py
+src/jax_unittrace.egg-info/PKG-INFO
+src/jax_unittrace.egg-info/SOURCES.txt
+src/jax_unittrace.egg-info/dependency_links.txt
+src/jax_unittrace.egg-info/requires.txt
+src/jax_unittrace.egg-info/top_level.txt
+tests/test_partitions.py
+tests/test_trace.py
+tests/test_units.py

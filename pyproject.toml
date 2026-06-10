@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jax-unittrace"
+version = "0.1.0"
+description = "Static symbolic unit tracing for ordinary JAX programs"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Blair-Johnson" }]
+dependencies = ["jax"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jax_unittrace = ["py.typed"]

@@ -1,0 +1,16 @@
+[workspace]
+authors = ["Blair-Johnson <blairjohnson@gatech.edu>"]
+channels = ["conda-forge"]
+name = "units"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+test = "pytest -q"
+
+[dependencies]
+jax = ">=0.9.2,<0.10"
+pytest = ">=9.0.3,<10"
+
+[pypi-dependencies]
+jax-unittrace = { path = ".", editable = true }
