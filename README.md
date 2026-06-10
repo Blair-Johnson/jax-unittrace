@@ -51,17 +51,75 @@ print(result.errors[0])
 
 ## Human-readable reports
 
-`trace_units` returns structured data and can be formatted into human-readable reports.
+`trace_units` returns structured data, but `TraceResult` can also format itself
+for interactive debugging. The default report emphasizes arrays, units, shapes,
+dtypes, diagnostics, and partitioned axes:
 
 ```python
-result = trace_units(bad, tag(jnp.ones(3), m), tag(jnp.ones(3), s))
-print(result.format(equations=True))
-# or
-result.print_report(equations=True, color=True)
-result.save_report("unit-report.txt", equations=True)
+def join(distance, time):
+    return jnp.concatenate([distance, time], axis=0)
+
+result = trace_units(join, tag(jnp.ones(2), m), tag(jnp.ones(3), s))
+print(result.format())
 ```
 
-Reports include inputs, outputs, diagnostics, and jaxpr equations.
+Example output:
+
+```text
+jax_unittrace report
+--------------------------------------------------------------------------------
+status: OK
+summary: 2 input(s), 1 output(s), 1 equation(s), 0 error(s), 0 warning(s)
+
+Inputs
+- input[0]: float32[2]
+    unit: m
+- input[1]: float32[3]
+    unit: s
+
+Outputs
+- output[0]: float32[5]
+    unit: partitioned
+    axis 0 is partitioned:
+      axis 0 [0:2)  m
+      axis 0 [2:5)  s
+
+Diagnostics
+- none
+```
+
+For locating an error in the JAX graph, use `debug=True`:
+
+```python
+mixed = trace_units(
+    lambda x: jnp.sum(x, axis=1),
+    tag(jnp.ones((4, 5)), axes={1: [(0, 3, m), (3, 5, s)]}),
+)
+print(mixed.format(debug=True))
+```
+
+The debug report includes the JAXPR equation where the issue arose plus a
+unit-annotated version of that equation:
+
+```text
+Diagnostics
+- [error] partitioned-reduction-mismatch in reduce_sum at equation 0:
+    reduction over a partitioned axis would add values with different units
+
+Debug context
+- reduce_sum at equation #0: reduction over a partitioned axis would add values with different units
+    JAXPR location:
+      a:f32[4] = reduce_sum[axes=(1,) out_sharding=None] b
+    Unit-annotated location:
+      #00 out0:float32[4]{1} = reduce_sum[units] in0:float32[4,5]{1; axis 1: [0:3)=m, [3:5)=s}
+```
+
+Convenience methods are available for scripts and notebooks:
+
+```python
+result.print_report(debug=True, color=True)
+result.save_report("unit-report.txt", debug=True)
+```
 
 ## Axis partitions
 
