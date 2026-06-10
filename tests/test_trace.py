@@ -44,7 +44,7 @@ def test_addition_with_different_units_is_an_error():
 
     assert not result.ok
     assert result.errors[0].code == "unit-mismatch"
-    assert "cannot combine" in result.errors[0].message
+    assert "cannot add values" in result.errors[0].message
     with pytest.raises(ValueError):
         result.raise_on_error()
 

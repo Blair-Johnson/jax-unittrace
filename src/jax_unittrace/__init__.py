@@ -15,7 +15,7 @@ Typical use::
     assert result.output_specs[0].unit == m / s
 """
 
-from .result import Diagnostic, EquationTrace, TraceResult, UnitTraceError
+from .result import Diagnostic, EquationTrace, TraceResult, UnitTraceError, format_report
 from .specs import ArraySpec, AxisPartition, AxisSegment
 from .tracer import TaggedArray, spec, tag, trace, trace_units
 from .units import ONE, Unit, as_unit, dimensionless, unit, units
@@ -33,6 +33,7 @@ __all__ = [
     "UnitTraceError",
     "as_unit",
     "dimensionless",
+    "format_report",
     "spec",
     "tag",
     "trace",

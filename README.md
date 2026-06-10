@@ -51,6 +51,23 @@ assert not result.ok
 print(result.errors[0])
 ```
 
+## Human-readable reports
+
+`trace_units` returns structured data, but the result can also format itself for
+interactive debugging:
+
+```python
+result = trace_units(bad, tag(jnp.ones(3), m), tag(jnp.ones(3), s))
+print(result.format(equations=True))
+# or
+result.print_report(equations=True, color=True)
+result.save_report("unit-report.txt", equations=True)
+```
+
+Reports include inputs, outputs, diagnostics, local equation context around
+errors, and hints for common ML bugs such as residual/add/where branches mixing
+arrays with different implicit units.
+
 ## Axis partitions
 
 Axis partitions represent piecewise units along array axes, especially the

@@ -56,7 +56,8 @@ def tag(
     """
 
     shape = getattr(value, "shape", None)
-    return TaggedArray(value, ArraySpec.from_user(unit, axes, shape))
+    dtype = _dtype_of_value(value)
+    return TaggedArray(value, ArraySpec.from_user(unit, axes, shape, dtype))
 
 
 def spec(unit: UnitLike = None, *, axes: Any | None = None) -> ArraySpec:
@@ -90,7 +91,7 @@ def trace_units(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> TraceResul
     closed = getattr(closed_jaxpr, "jaxpr", closed_jaxpr)
     invars = tuple(closed.invars)
     input_specs = tuple(
-        _with_aval_shape(input_spec, invar)
+        _with_aval_metadata(input_spec, invar)
         for input_spec, invar in zip(spec_leaves, invars, strict=False)
     )
     interpreter = _Interpreter()
@@ -113,6 +114,7 @@ class _Interpreter:
     def __init__(self) -> None:
         self.diagnostics: list[Diagnostic] = []
         self._equation_counter = 0
+        self._pending_nested_traces: list[EquationTrace] = []
 
     def eval_closed_jaxpr(
         self,
@@ -135,27 +137,34 @@ class _Interpreter:
         for constvar, const in zip(tuple(getattr(jaxpr, "constvars", ())), consts, strict=False):
             env[constvar] = _dimensionless_from_aval(constvar).with_shape(getattr(const, "shape", None))
         for invar, input_spec in zip(tuple(jaxpr.invars), input_specs, strict=False):
-            env[invar] = _with_aval_shape(input_spec, invar)
+            env[invar] = _with_aval_metadata(input_spec, invar)
 
         for eqn in jaxpr.eqns:
             index = self._equation_counter
             self._equation_counter += 1
             primitive = eqn.primitive.name
             in_specs = tuple(_read_env(env, invar) for invar in eqn.invars)
+            pending_start = len(self._pending_nested_traces)
             out_specs = self._eval_eqn(primitive, in_specs, eqn.invars, eqn.params, eqn.outvars, index)
+            nested_traces = tuple(self._pending_nested_traces[pending_start:])
+            del self._pending_nested_traces[pending_start:]
             if len(out_specs) != len(eqn.outvars):
                 out_specs = _fit_output_arity(out_specs, len(eqn.outvars), eqn.outvars)
             for outvar, out_spec in zip(eqn.outvars, out_specs, strict=False):
-                env[outvar] = _with_aval_shape(out_spec, outvar)
+                env[outvar] = _with_aval_metadata(out_spec, outvar)
             equation_traces.append(
                 EquationTrace(
                     index=index,
                     primitive=primitive,
                     input_specs=in_specs,
-                    output_specs=tuple(_with_aval_shape(spec, outvar) for spec, outvar in zip(out_specs, eqn.outvars, strict=False)),
+                    output_specs=tuple(_with_aval_metadata(spec, outvar) for spec, outvar in zip(out_specs, eqn.outvars, strict=False)),
                     params=_safe_params(eqn.params),
+                    invars=tuple(str(var) for var in eqn.invars),
+                    outvars=tuple(str(var) for var in eqn.outvars),
+                    jaxpr=str(eqn),
                 )
             )
+            equation_traces.extend(nested_traces)
 
         outputs = tuple(_read_env(env, outvar) for outvar in jaxpr.outvars)
         var_specs = {str(var): spec for var, spec in env.items()}
@@ -347,7 +356,7 @@ class _Interpreter:
             return (ArraySpec(ONE, (), output_shape),)
 
         if primitive in {"iota", "rng_bit_generator", "random_seed", "random_split"}:
-            return tuple(ArraySpec(ONE, (), _shape_of_var(outvar)) for outvar in outvars)
+            return tuple(_dimensionless_from_aval(outvar) for outvar in outvars)
 
 
         if primitive == "cond":
@@ -357,7 +366,8 @@ class _Interpreter:
             return self._eval_scan(inputs, params, outvars, equation_index)
         if "jaxpr" in params and primitive in {"jit", "pjit", "xla_call", "call"}:
             nested = params["jaxpr"]
-            nested_outputs, _, _ = self.eval_closed_jaxpr(nested, inputs)
+            nested_outputs, nested_traces, _ = self.eval_closed_jaxpr(nested, inputs)
+            self._pending_nested_traces.extend(nested_traces)
             return tuple(spec.with_shape(_shape_of_var(outvar)) for spec, outvar in zip(nested_outputs, outvars, strict=False))
 
         return self._fallback(primitive, inputs, outvars, equation_index)
@@ -373,9 +383,13 @@ class _Interpreter:
         branch_inputs = inputs[1:]
         branches = tuple(params.get("branches", ()))
         if not branches:
-            return tuple(ArraySpec(ONE, (), _shape_of_var(outvar)) for outvar in outvars)
+            return tuple(_dimensionless_from_aval(outvar) for outvar in outvars)
 
-        branch_outputs = [self.eval_closed_jaxpr(branch, branch_inputs)[0] for branch in branches]
+        branch_outputs: list[tuple[ArraySpec, ...]] = []
+        for branch in branches:
+            outputs, traces, _ = self.eval_closed_jaxpr(branch, branch_inputs)
+            branch_outputs.append(outputs)
+            self._pending_nested_traces.extend(traces)
         merged: list[ArraySpec] = []
         for output_index, output_group in enumerate(zip(*branch_outputs, strict=False)):
             first = output_group[0]
@@ -411,7 +425,8 @@ class _Interpreter:
         body_inputs = tuple(const_specs) + tuple(carry_specs) + tuple(
             self._scan_slice_input_spec(spec, equation_index) for spec in xs_specs
         )
-        body_outputs = self.eval_closed_jaxpr(body_jaxpr, body_inputs)[0]
+        body_outputs, body_traces, _ = self.eval_closed_jaxpr(body_jaxpr, body_inputs)
+        self._pending_nested_traces.extend(body_traces)
 
         carry_outputs = body_outputs[:num_carry]
         for carry_input, carry_output in zip(carry_specs, carry_outputs, strict=False):
@@ -453,7 +468,7 @@ class _Interpreter:
         equation_index: int,
     ) -> tuple[ArraySpec, ...]:
         if not inputs:
-            return tuple(ArraySpec(ONE, (), _shape_of_var(outvar)) for outvar in outvars)
+            return tuple(_dimensionless_from_aval(outvar) for outvar in outvars)
         if len(inputs) == 1:
             return tuple(inputs[0].with_shape(_shape_of_var(outvar)) for outvar in outvars)
         first = inputs[0]
@@ -480,7 +495,7 @@ class _Interpreter:
         if not compatible_for_addition(left, right):
             self._error(
                 "unit-mismatch",
-                f"cannot combine {left.describe()} with {right.describe()}",
+                _unit_mismatch_message(primitive, left, right),
                 primitive,
                 equation_index,
                 left=left.describe(),
@@ -524,6 +539,16 @@ class _Interpreter:
     def _warn(self, code: str, message: str, primitive: str, equation_index: int, **details: Any) -> None:
         self.diagnostics.append(Diagnostic("warning", code, message, primitive, equation_index, details))
 
+
+def _unit_mismatch_message(primitive: str, left: ArraySpec, right: ArraySpec) -> str:
+    if primitive in {"add", "sub"}:
+        action = "add" if primitive == "add" else "subtract"
+        return f"cannot {action} values with units {left.describe()} and {right.describe()}"
+    if primitive in {"select_n", "cond"}:
+        return f"branch alternatives have incompatible units {left.describe()} and {right.describe()}"
+    if primitive in {"eq", "ne", "ge", "gt", "le", "lt", "max", "min"}:
+        return f"cannot compare ordered values with units {left.describe()} and {right.describe()}"
+    return f"unit mismatch in {primitive}: expected compatible units, got {left.describe()} and {right.describe()}"
 
 _DIMENSIONLESS_INPUT_OUTPUT_PRIMITIVES = {
     "acos",
@@ -586,18 +611,25 @@ def _unwrap_tree(value: Any) -> tuple[Any, Any]:
 
 
 def _default_spec_for_value(value: Any) -> ArraySpec:
-    return ArraySpec(ONE, (), getattr(value, "shape", None))
+    return ArraySpec(ONE, (), getattr(value, "shape", None), _dtype_of_value(value))
+
+def _dtype_of_value(value: Any) -> str | None:
+    dtype = getattr(value, "dtype", None)
+    if dtype is None:
+        return None
+    return str(dtype)
 
 
 def _dimensionless_from_aval(var: Any) -> ArraySpec:
-    return ArraySpec(ONE, (), _shape_of_var(var))
+    return ArraySpec(ONE, (), _shape_of_var(var), _dtype_of_var(var))
 
 
-def _with_aval_shape(spec: ArraySpec, var: Any) -> ArraySpec:
+def _with_aval_metadata(spec: ArraySpec, var: Any) -> ArraySpec:
     shape = _shape_of_var(var)
-    if shape is None:
+    dtype = _dtype_of_var(var)
+    if shape is None and dtype is None:
         return spec
-    return spec.with_shape(shape)
+    return spec.with_metadata(shape if shape is not None else spec.shape, dtype if dtype is not None else spec.dtype)
 
 
 def _shape_of_var(var: Any) -> tuple[int, ...] | None:
@@ -614,17 +646,28 @@ def _shape_of_var(var: Any) -> tuple[int, ...] | None:
         return None
 
 
+
+
+def _dtype_of_var(var: Any) -> str | None:
+    aval = getattr(var, "aval", None)
+    dtype = getattr(aval, "dtype", None)
+    if dtype is None:
+        value = getattr(var, "val", None)
+        dtype = getattr(value, "dtype", None)
+    if dtype is None:
+        return None
+    return str(dtype)
 def _read_env(env: Mapping[Any, ArraySpec], var: Any) -> ArraySpec:
     value = getattr(var, "val", None)
     if value is not None:
-        return ArraySpec(ONE, (), getattr(value, "shape", _shape_of_var(var)))
+        return ArraySpec(ONE, (), getattr(value, "shape", _shape_of_var(var)), _dtype_of_value(value))
     try:
         found = var in env
     except TypeError:
         found = False
     if found:
         return env[var]
-    return ArraySpec(ONE, (), _shape_of_var(var))
+    return ArraySpec(ONE, (), _shape_of_var(var), _dtype_of_var(var))
 
 
 def _merge_additive_output(left: ArraySpec, right: ArraySpec) -> ArraySpec:
@@ -665,7 +708,7 @@ def _fit_output_arity(specs: Sequence[ArraySpec], arity: int, outvars: Sequence[
     if arity == 0:
         return ()
     if not specs:
-        return tuple(ArraySpec(ONE, (), _shape_of_var(outvar)) for outvar in outvars)
+        return tuple(_dimensionless_from_aval(outvar) for outvar in outvars)
     if len(specs) == arity:
         return tuple(specs)
     if len(specs) == 1:

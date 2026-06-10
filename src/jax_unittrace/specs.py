@@ -72,12 +72,15 @@ class ArraySpec:
     unit: Unit = ONE
     partitions: tuple[AxisPartition, ...] = field(default_factory=tuple)
     shape: tuple[int, ...] | None = None
+    dtype: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "unit", as_unit(self.unit))
         object.__setattr__(self, "partitions", _normalize_partitions(self.partitions))
         if self.shape is not None:
             object.__setattr__(self, "shape", tuple(int(x) for x in self.shape))
+        if self.dtype is not None:
+            object.__setattr__(self, "dtype", str(self.dtype))
 
     @classmethod
     def from_user(
@@ -85,18 +88,22 @@ class ArraySpec:
         unit: UnitLike = None,
         axes: PartitionInput | None = None,
         shape: Sequence[int] | None = None,
+        dtype: str | None = None,
     ) -> "ArraySpec":
-        return cls(as_unit(unit), normalize_axes(axes), None if shape is None else tuple(shape))
+        return cls(as_unit(unit), normalize_axes(axes), None if shape is None else tuple(shape), dtype)
 
     @property
     def is_uniform(self) -> bool:
         return not self.partitions
 
     def with_shape(self, shape: Sequence[int] | None) -> "ArraySpec":
-        return ArraySpec(self.unit, self.partitions, None if shape is None else tuple(shape))
+        return ArraySpec(self.unit, self.partitions, None if shape is None else tuple(shape), self.dtype)
+
+    def with_metadata(self, shape: Sequence[int] | None, dtype: str | None) -> "ArraySpec":
+        return ArraySpec(self.unit, self.partitions, None if shape is None else tuple(shape), dtype)
 
     def without_partitions(self) -> "ArraySpec":
-        return ArraySpec(self.unit, (), self.shape)
+        return ArraySpec(self.unit, (), self.shape, self.dtype)
 
     def equivalent_units(self, other: "ArraySpec") -> bool:
         """Return true when element units are symbolically identical."""
@@ -114,6 +121,7 @@ class ArraySpec:
             fn(self.unit),
             tuple(partition.map_units(fn) for partition in self.partitions),
             self.shape,
+            self.dtype,
         )
 
     def multiply(self, other: "ArraySpec") -> "ArraySpec":
