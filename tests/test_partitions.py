@@ -216,3 +216,54 @@ def test_same_layout_partial_partitioned_arrays_require_matching_fallbacks():
 
     assert not result.ok
     assert result.errors[0].code == "unit-mismatch"
+
+
+def test_dot_general_errors_when_contracting_mixed_unit_partition_axis():
+    i_unit = unit("I")
+    q_unit = unit("Q")
+
+    result = trace_units(
+        lambda x, w: x @ w,
+        tag(jnp.ones((4, 2)), axes={1: [(0, 1, i_unit), (1, 2, q_unit)]}),
+        tag(jnp.ones((2, 3))),
+    )
+
+    assert not result.ok
+    assert result.errors[0].code == "partitioned-dot-contract-mismatch"
+
+
+def test_dot_general_allows_contracting_homogeneous_partition_axis():
+    m = unit("m")
+    kg = unit("kg")
+
+    result = trace_units(
+        lambda x, w: x @ w,
+        tag(jnp.ones((4, 2)), axes={1: [(0, 1, m), (1, 2, m)]}),
+        tag(jnp.ones((2, 3)), kg),
+    )
+
+    assert result.ok
+    assert result.output_specs[0].unit == m * kg
+    assert result.output_specs[0].partitions == ()
+
+
+def test_dot_general_propagates_noncontracted_rhs_partition_axis():
+    kg = unit("kg")
+    m = unit("m")
+    s = unit("s")
+
+    result = trace_units(
+        lambda x, w: x @ w,
+        tag(jnp.ones((2, 3)), kg),
+        tag(jnp.ones((3, 5)), axes={1: [(0, 2, m), (2, 5, s)]}),
+    )
+
+    assert result.ok
+    out = result.output_specs[0]
+    assert out.unit == kg
+    partition = out.partitions[0]
+    assert partition.axis == 1
+    assert [(seg.start, seg.stop, seg.unit) for seg in partition.segments] == [
+        (0, 2, kg * m),
+        (2, 5, kg * s),
+    ]

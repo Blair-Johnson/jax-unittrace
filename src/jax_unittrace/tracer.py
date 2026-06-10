@@ -11,6 +11,8 @@ import jax
 from .result import Diagnostic, EquationTrace, TraceResult
 from .specs import (
     ArraySpec,
+    AxisPartition,
+    AxisSegment,
     compatible_for_addition,
     concatenate_specs,
     reduce_partitions,
@@ -343,16 +345,7 @@ class _Interpreter:
             return (unit_spec.with_shape(output_shape),)
 
         if primitive in {"dot_general"}:
-            self._warn_if_cross_partition_product(inputs[:2], primitive, equation_index)
-            result = inputs[0].multiply(inputs[1]).without_partitions().with_shape(output_shape)
-            if inputs[0].partitions or inputs[1].partitions:
-                self._warn(
-                    "partition-dropped",
-                    "dot_general multiplied units but dropped axis partitions",
-                    primitive,
-                    equation_index,
-                )
-            return (result,)
+            return (self._eval_dot_general(inputs[0], inputs[1], params, outvars[0], equation_index),)
 
         if primitive in {"select_n"}:
             # JAX encodes where/select as predicate followed by branch values.
@@ -367,7 +360,6 @@ class _Interpreter:
         if primitive in {"iota", "rng_bit_generator", "random_seed", "random_split"}:
             return tuple(_dimensionless_from_aval(outvar) for outvar in outvars)
 
-
         if primitive == "cond":
             return self._eval_cond(inputs, params, outvars, equation_index)
 
@@ -380,6 +372,78 @@ class _Interpreter:
             return tuple(spec.with_shape(_shape_of_var(outvar)) for spec, outvar in zip(nested_outputs, outvars, strict=False))
 
         return self._fallback(primitive, inputs, outvars, equation_index)
+
+    def _eval_dot_general(
+        self,
+        left: ArraySpec,
+        right: ArraySpec,
+        params: Mapping[str, Any],
+        outvar: Any,
+        equation_index: int,
+    ) -> ArraySpec:
+        output_shape = _shape_of_var(outvar)
+        dimension_numbers = params.get("dimension_numbers", ((((), ()), ((), ()))))
+        (left_contract, right_contract), (left_batch, right_batch) = dimension_numbers
+        left_contract = tuple(int(axis) for axis in left_contract)
+        right_contract = tuple(int(axis) for axis in right_contract)
+        left_batch = tuple(int(axis) for axis in left_batch)
+        right_batch = tuple(int(axis) for axis in right_batch)
+
+        self._check_dot_contract_partitions(left, left_contract, "lhs", equation_index)
+        self._check_dot_contract_partitions(right, right_contract, "rhs", equation_index)
+        left_effective_unit = _dot_effective_operand_unit(left, left_contract)
+        right_effective_unit = _dot_effective_operand_unit(right, right_contract)
+        result = ArraySpec(left_effective_unit * right_effective_unit, (), output_shape, _dtype_of_var(outvar))
+
+        output_partitions: list[AxisPartition] = []
+        lhs_kept_count = _dot_kept_axis_count(left, left_contract, left_batch)
+        output_partitions.extend(
+            _dot_output_partitions_from_operand(
+                left,
+                left_contract,
+                left_batch,
+                other_unit=right_effective_unit,
+                lhs_kept_count=lhs_kept_count,
+                output_side="lhs",
+            )
+        )
+        output_partitions.extend(
+            _dot_output_partitions_from_operand(
+                right,
+                right_contract,
+                right_batch,
+                other_unit=left_effective_unit,
+                lhs_kept_count=lhs_kept_count,
+                output_side="rhs",
+            )
+        )
+        if output_partitions:
+            result = ArraySpec(result.unit, tuple(output_partitions), output_shape, result.dtype)
+        return result
+
+    def _check_dot_contract_partitions(
+        self,
+        spec: ArraySpec,
+        contract_axes: tuple[int, ...],
+        operand_name: str,
+        equation_index: int,
+    ) -> None:
+        for partition in spec.partitions:
+            if partition.axis not in contract_axes:
+                continue
+            units = {segment.unit for segment in partition.segments}
+            if not _partition_covers_shape_axis(partition, spec.shape):
+                units.add(spec.unit)
+            if len(units) > 1:
+                self._error(
+                    "partitioned-dot-contract-mismatch",
+                    f"dot_general contracts over partitioned {operand_name} axis {partition.axis} with units {', '.join(str(unit) for unit in units)}",
+                    "dot_general",
+                    equation_index,
+                    operand=operand_name,
+                    axis=partition.axis,
+                    units=tuple(str(unit) for unit in units),
+                )
 
     def _eval_cond(
         self,
@@ -641,6 +705,66 @@ _ADDITIVE_REDUCTIONS = {"reduce_sum", "reduce_window_sum", "cumsum"}
 _MULTIPLICATIVE_REDUCTIONS = {"reduce_prod", "cumprod"}
 _EXTREMUM_REDUCTIONS = {"reduce_max", "reduce_min"}
 
+
+def _dot_kept_axis_count(
+    spec: ArraySpec,
+    contract_axes: tuple[int, ...],
+    batch_axes: tuple[int, ...],
+) -> int:
+    return len([axis for axis in range(len(spec.shape or ())) if axis not in contract_axes and axis not in batch_axes])
+
+
+def _dot_effective_operand_unit(spec: ArraySpec, contract_axes: tuple[int, ...]) -> Unit:
+    effective = spec.unit
+    for partition in spec.partitions:
+        if partition.axis not in contract_axes:
+            continue
+        units = {segment.unit for segment in partition.segments}
+        if not _partition_covers_shape_axis(partition, spec.shape):
+            units.add(spec.unit)
+        if len(units) == 1:
+            effective = next(iter(units))
+    return effective
+
+def _dot_output_partitions_from_operand(
+    spec: ArraySpec,
+    contract_axes: tuple[int, ...],
+    batch_axes: tuple[int, ...],
+    *,
+    other_unit: Unit,
+    lhs_kept_count: int,
+    output_side: str,
+) -> tuple[AxisPartition, ...]:
+    if not spec.partitions:
+        return ()
+    kept_axes = [axis for axis in range(len(spec.shape or ())) if axis not in contract_axes and axis not in batch_axes]
+    output_partitions: list[AxisPartition] = []
+    for partition in spec.partitions:
+        if partition.axis in contract_axes:
+            continue
+        if partition.axis in batch_axes:
+            out_axis = batch_axes.index(partition.axis)
+        elif partition.axis in kept_axes:
+            kept_index = kept_axes.index(partition.axis)
+            if output_side == "lhs":
+                out_axis = len(batch_axes) + kept_index
+            else:
+                out_axis = len(batch_axes) + lhs_kept_count + kept_index
+        else:
+            continue
+        output_partitions.append(partition.map_units(lambda unit: unit * other_unit).remap_axis(out_axis))
+    return tuple(output_partitions)
+
+
+def _partition_covers_shape_axis(partition: AxisPartition, shape: tuple[int, ...] | None) -> bool:
+    if shape is None or partition.axis >= len(shape):
+        return False
+    expected = 0
+    for segment in partition.segments:
+        if segment.start != expected:
+            return False
+        expected = segment.stop
+    return expected == int(shape[partition.axis])
 
 def _stack_scan_axis(spec: ArraySpec, shape: tuple[int, ...] | None) -> ArraySpec:
     if not spec.partitions:
